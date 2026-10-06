@@ -76,12 +76,20 @@ type EnvironmentGitops struct {
 	Inventory    string `yaml:"inventory"`
 }
 
-// EnvironmentIngressRoute binds one public service endpoint to exact hosts.
+// EnvironmentIngressRoute says how one public service endpoint is reached from
+// outside the cell: on hosts of its own, or through another endpoint's origin.
+// Exactly one of the two, so a route always answers the question it exists to
+// answer (see PublicOriginFor).
 type EnvironmentIngressRoute struct {
 	Name     string   `yaml:"name"`
 	Service  string   `yaml:"service"`
 	Endpoint string   `yaml:"endpoint"`
 	Hosts    []string `yaml:"hosts"`
+	// Via names the "<module>/<service>/<endpoint>" whose public origin this
+	// endpoint is reached through — a backend a front door proxies to, say. The
+	// endpoint has no host of its own, and the origin it answers under is that
+	// one's, which is what its workload is then told.
+	Via string `yaml:"via,omitempty"`
 }
 
 // EnvironmentSecretStoreReference selects the External Secrets store that
@@ -916,6 +924,11 @@ type Environment struct {
 	Gitops    *EnvironmentGitops   `yaml:"gitops,omitempty"`
 
 	Ingress []EnvironmentIngressRoute `yaml:"ingress,omitempty"`
+
+	// SolutionBoundary declares what a composed solution may reach directly in
+	// this environment. Absent, it may reach nothing outside its own module.
+	// CLI-side; not serialized to proto.
+	SolutionBoundary *EnvironmentSolutionBoundary `yaml:"solution-boundary,omitempty"`
 
 	// ManagedServices keys a replacement by the identity of the service it
 	// replaces: "<module>/<service>", or a bare "<service>" when exactly one

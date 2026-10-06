@@ -270,7 +270,11 @@ func treeDigest(t *testing.T, root string) string {
 // no declaration, captured on main before the container-port check existed
 // (b990c162, with only the serviceFlow seam added). A render that declares
 // nothing must stay byte-identical.
-const undeclaredFixtureDigest = "aaca0799de4ebe4f9afa38c7cb84594a63b7b2dfd984251de5d90c4fd03cee0d"
+//
+// Re-captured when a deployed render began binding every workload to a service
+// account of its own: the tree now also carries each service's serviceaccount
+// .yaml and its serviceAccountName. Nothing else about it moved.
+const undeclaredFixtureDigest = "1f0e8a7a745d8df9f04fd8bca3056e7444ff7c3fa3cc470628f191151e60448a"
 
 func TestRenderModuleWithoutDeclarationsIsByteIdentical(t *testing.T) {
 	installFakeAgents(t)

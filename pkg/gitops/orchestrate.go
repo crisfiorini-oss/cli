@@ -114,6 +114,11 @@ func renderModuleTree(
 		deployed := make(map[string]*basev0.Configuration)
 		secretKeys := make(map[string][]string)
 		inClusterPorts := make(map[string]map[string]uint32)
+		// A principal belongs to one service. Within a module the accounts this
+		// render derives are distinct by construction, but a service whose agent
+		// names its own can collide with another's, and only something that sees
+		// every service of the render can tell.
+		claimed := namespaceAccounts{}
 		destinations := moduleStageDestinations(workspace, module, stage)
 		for _, service := range roots {
 			if flowErr := serviceFlow(
@@ -157,7 +162,7 @@ func renderModuleTree(
 		if err = collectRenderTemplates(scope.Templates, deployed, secretKeys); err != nil {
 			return err
 		}
-		injections, err := deriveRenderInjections(ctx, workspace, selfEndpoints, sink)
+		injections, err := deriveRenderInjections(ctx, workspace, env, selfEndpoints, sink)
 		if err != nil {
 			return err
 		}
@@ -211,6 +216,13 @@ func renderModuleTree(
 					inClusterPorts[resources.ServiceUnique(module.Name, service.Name)],
 				); portsErr != nil {
 					return portsErr
+				}
+				if claimErr := claimed.recordUnit(
+					filepath.Join(stage, unitDir, service.Name),
+					env,
+					resources.ServiceUnique(module.Name, service.Name),
+				); claimErr != nil {
+					return claimErr
 				}
 			}
 			options.Units = append(options.Units, entry)
@@ -381,7 +393,7 @@ func renderService(ctx context.Context, workspace *resources.Workspace, module *
 		); err != nil {
 			return err
 		}
-		injections, err := deriveRenderInjections(ctx, workspace, selfEndpoints, sink)
+		injections, err := deriveRenderInjections(ctx, workspace, env, selfEndpoints, sink)
 		if err != nil {
 			return err
 		}
