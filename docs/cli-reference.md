@@ -2012,6 +2012,10 @@ DEV ESCAPE HATCH: push one service's local code into an already-rendered GitOps 
 Build and push ONE service from local code — --path, else its machine-local
 service override — through the same build path `deploy gitops render` uses, then
 re-pin only that service's image digest in the environment's rendered tree.
+When the environment declares a host, its cell file is re-derived as well: the
+cell admits only the builds that file names, so the new digest goes with it.
+It refuses, before building, when the re-derived file would move anything but
+this service's images against the file the branch carries.
 
 The environment then runs code no release describes. The render inventory
 records it under "dev", `codefly doctor workspace` warns while it is active, and
@@ -2281,7 +2285,8 @@ deployments/modules, and resolves each remote property to a source: kept (alread
 stored), propagated (a configuration value another remote key already holds),
 generated (declared random by the environment's service-secrets.generate), or
 required (supplied by the operator, and named). The store is the backend behind
-the SecretStore the render names, read from the environment's cluster.
+the SecretStore the render names, read from the environment's cluster; a render
+reading through several stores is planned and written store by store.
 
 Each property is resolved by the secret key the render reads out of it, not by
 the property name the environment files that key under, so an environment that
@@ -4194,12 +4199,15 @@ Flags:
       --fixture string                            Fixture override (defaults to the selected Codefly environment)
       --headless                                  Run without TUI (auto-enabled when no TTY, e.g. MCP, CI, pipes)
       --naming-scope string                       Runtime naming scope: fold a scope into port derivation for a disjoint port set (parallel runs / test encapsulation)
+      --output-env string                         Write one service's full SDK/runtime environment to an owner-only file
+      --output-env-service string                 Service whose runtime environment to export (module/service; defaults to the first composition root)
       --profile string                            Named workspace run profile
       --readiness-timeout duration                Maximum time to wait for the flow to become ready (default 10m0s)
       --runtime-context string                    Runtime context for the flow (native/container/nix/free) (default "free")
       --set strings                               Per-service runtime env override (repeatable)
       --silent strings                            Silence services in CLI output
       --start-docker                              Auto-start a local Docker engine if a service needs Docker and it isn't running (default true)
+      --temporary-ports show network              Run this flow as a disposable invocation: OS-probed ephemeral ports plus a generated naming scope isolating its agents, containers and runtime state (advanced; not previewable via show network). The Codefly SDK sets it for test-owned dependency stacks. Passing --naming-scope wins, and passing it empty asks for no scope at all
 ```
 
 ## `codefly sbom`

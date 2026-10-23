@@ -207,6 +207,29 @@ type EnvironmentManagedSecretReference struct {
 type EnvironmentSecretRemoteRef struct {
 	Key      string `yaml:"key"`
 	Property string `yaml:"property,omitempty"`
+	// SecretStore, when set, is the store THIS key is read through, where the
+	// service's other keys read through the service's (or the environment's)
+	// store. A producer resolves it like every other reference: a cell keeps
+	// its identity provider's secrets in a store of their own, and the
+	// contract names it per key rather than moving the whole service. Rendered
+	// as the ExternalSecret data item's sourceRef.storeRef.
+	SecretStore *EnvironmentSecretStoreReference `yaml:"secret-store,omitempty"`
+}
+
+// Equal reports whether two references name the same remote location: the
+// same key and property, read through the same store (nil meaning the
+// service's). A pointer field would otherwise compare by address.
+func (ref EnvironmentSecretRemoteRef) Equal(other EnvironmentSecretRemoteRef) bool {
+	if ref.Key != other.Key || ref.Property != other.Property {
+		return false
+	}
+	switch {
+	case ref.SecretStore == nil && other.SecretStore == nil:
+		return true
+	case ref.SecretStore == nil || other.SecretStore == nil:
+		return false
+	}
+	return *ref.SecretStore == *other.SecretStore
 }
 
 // UnmarshalYAML accepts either a scalar remote key ("lodestar-accounts", which
@@ -219,13 +242,24 @@ func (ref *EnvironmentSecretRemoteRef) UnmarshalYAML(node *yaml.Node) error {
 	}
 	if node.Kind == yaml.MappingNode {
 		for i := 0; i < len(node.Content); i += 2 {
-			if key := node.Content[i].Value; key != "key" && key != "property" {
+			if key := node.Content[i].Value; key != "key" && key != "property" && key != "secret-store" {
 				return fmt.Errorf("unknown secret reference field %q", key)
 			}
 		}
 	}
 	type plain EnvironmentSecretRemoteRef
-	return node.Decode((*plain)(ref))
+	if err := node.Decode((*plain)(ref)); err != nil {
+		return err
+	}
+	if ref.SecretStore != nil {
+		if ref.SecretStore.Name == "" || ref.SecretStore.Kind == "" {
+			return fmt.Errorf("secret reference %q names a secret-store without both name and kind", ref.Key)
+		}
+		if ref.SecretStore.Kind != "SecretStore" && ref.SecretStore.Kind != "ClusterSecretStore" {
+			return fmt.Errorf("secret reference %q names secret-store kind %q; only SecretStore and ClusterSecretStore resolve an ExternalSecret", ref.Key, ref.SecretStore.Kind)
+		}
+	}
+	return nil
 }
 
 // MarshalYAML emits the terse scalar form (the remote key alone) when no property
@@ -233,7 +267,7 @@ func (ref *EnvironmentSecretRemoteRef) UnmarshalYAML(node *yaml.Node) error {
 // rewrites it in place — preserves a scalar remote-key declaration instead of
 // expanding it to a {key: …} mapping. With a property it emits the full mapping.
 func (ref EnvironmentSecretRemoteRef) MarshalYAML() (any, error) {
-	if ref.Property == "" {
+	if ref.Property == "" && ref.SecretStore == nil {
 		return ref.Key, nil
 	}
 	type plain EnvironmentSecretRemoteRef
@@ -739,6 +773,9 @@ const (
 	SecretGeneratorFormatHex        = "hex"
 	SecretGeneratorFormatBase64     = "base64"
 	SecretGeneratorFormatIdentifier = "identifier"
+	// SecretGeneratorFormatEd25519PKCS8 mints an Ed25519 private key (standard
+	// base64 of its PKCS#8 DER) instead of random bytes; it takes no `bytes`.
+	SecretGeneratorFormatEd25519PKCS8 = "ed25519-pkcs8" //nolint:gosec // G101: a generator format name, not a credential
 )
 
 // EnvironmentSecretGenerator names keys of one configuration group that the
@@ -749,7 +786,8 @@ const (
 // Format is the value's encoding: hex (default) or base64 of Bytes random bytes
 // (default 32), or identifier — a lowercase letter followed by hex, for a value
 // that must also be a SQL or DNS identifier (a database owner name), of Bytes
-// random bytes (default 12).
+// random bytes (default 12), or ed25519-pkcs8 — an Ed25519 private key as
+// standard base64 of its PKCS#8 DER, sized by the algorithm (no Bytes).
 type EnvironmentSecretGenerator struct {
 	Scope         string   `yaml:"scope"`
 	Configuration string   `yaml:"configuration"`
@@ -799,12 +837,29 @@ func (generator *EnvironmentSecretGenerator) validate(index int) error {
 		}
 	}
 	switch generator.Format {
-	case "", SecretGeneratorFormatHex, SecretGeneratorFormatBase64, SecretGeneratorFormatIdentifier:
+	case "", SecretGeneratorFormatHex, SecretGeneratorFormatBase64, SecretGeneratorFormatIdentifier,
+		SecretGeneratorFormatEd25519PKCS8:
 	default:
-		return fmt.Errorf("%s: format must be hex, base64 or identifier, got %q", label, generator.Format)
+		return fmt.Errorf("%s: format must be hex, base64, identifier or ed25519-pkcs8, got %q", label, generator.Format)
 	}
 	if generator.Bytes < 0 {
 		return fmt.Errorf("%s: bytes must be positive", label)
+	}
+	if generator.Format == SecretGeneratorFormatEd25519PKCS8 {
+		// The key's size is the algorithm's. Refused at load, not at the first
+		// `deploy secrets`, so a declaration that cannot mint is never planned.
+		if generator.Bytes != 0 {
+			return fmt.Errorf("%s: format ed25519-pkcs8 is sized by the algorithm; bytes cannot be set", label)
+		}
+		// A signing key is ONE workload's identity. A service configuration of
+		// several services would hand the same private key to every reader, and
+		// any of them could sign as the others. A workspace group is checked when
+		// the plan knows who reads it: `deploy secrets` refuses one read by more
+		// than one service.
+		if len(generator.Keys) != 1 ||
+			(generator.Scope == SecretGeneratorScopeService && len(generator.Services) != 1) {
+			return fmt.Errorf("%s: format ed25519-pkcs8 is one service's signing key: declare exactly one key, and for scope service exactly one service", label)
+		}
 	}
 	return nil
 }
@@ -1269,6 +1324,11 @@ type Environment struct {
 	Gitops    *EnvironmentGitops   `yaml:"gitops,omitempty"`
 
 	Ingress []EnvironmentIngressRoute `yaml:"ingress,omitempty"`
+
+	// Telemetry is the OTLP intake this environment's services export their
+	// operational telemetry to; see EnvironmentTelemetry. CLI-side; delivered
+	// to services as OpenTelemetry's own environment variables.
+	Telemetry *EnvironmentTelemetry `yaml:"telemetry,omitempty"`
 
 	// Host names the deployment host this environment delivers to: the
 	// coordinate that identifies it, the component instance within it, the

@@ -113,9 +113,16 @@ Run the whole composition locally: the host's ingress services, and every
 service of every other composed module. Every service, not only what the
 dependency graph reaches: a solution's `api.consumes` and a module's
 configuration references (`${endpoint:model/model/rest}`) name producers the
-graph never sees. It takes the flags of `codefly run service` and no service
-names; `--exclude-dependency` and `--exclude-workspace-configuration` leave a
-service or a configuration group out.
+graph never sees. It takes no service names and the flags of `codefly run
+service` that do not name one root service — `--naming-scope`,
+`--temporary-ports`, `--output-env`, `--runtime-context`, `--set` among them,
+never `--stand-alone` or `--exclude-root`; `--exclude-dependency` and
+`--exclude-workspace-configuration` leave a service or a configuration group
+out. The deterministic port hash folds every endpoint into a few thousand
+buckets, so a `--naming-scope` can hash two endpoints to one port and abort
+the run; `--temporary-ports` sidesteps the hash, under the ordering its
+allocation needs — a workspace configuration reference to a service that has
+not initialized yet cannot be resolved (see [orchestration](orchestration.md)).
 
 **Addresses across a reload.** A service keeps the addresses it was accepted
 at for the whole run: under `--temporary-ports` the kernel-assigned ports of
@@ -826,12 +833,29 @@ endpoints, so the Job's identity is admitted to the service it bootstraps.
 environments:
   staging:
     host: {coordinate: region-a, component: platform-host, trust_domain: cell.example}
+    telemetry: {otlp-endpoint: otel.internal.ops.example:443}
     cell:
       edge/gateway: {bindings: [identity], presenter: [workload]}
       shop/api: {bindings: [vault, identity], cloud-identity: true}
     egress:
       shop/api: {hosts: [identity.example.test, {name: api.github.com, port: 8443}]}
 ```
+
+**Where a service's telemetry goes.** An environment's `telemetry:` block names
+the OTLP intake its services export operational traces to: `otlp-endpoint` as
+`host:port` (TLS; `insecure: true` for plaintext) or as an `http://`/`https://`
+URL. On a hosted environment it is imported from the coordinate contract — the
+producer resolves it, as it resolves every other address; `local` names the
+developer's own collector. No service declares it and no configuration group
+carries it: every service the CLI runs (`codefly run`, native or container) or
+renders (`codefly deploy gitops render`) receives OpenTelemetry's own variables,
+derived like the self-endpoint carrier and layered beneath an operator's `--set` —
+`OTEL_EXPORTER_OTLP_ENDPOINT` (always a URL: a bare `host:port` is delivered as
+`https://host:port`, or `http://` when `insecure`, because the scheme is how every
+SDK learns the transport), `OTEL_SERVICE_NAME` (`<module>/<service>`) and
+`OTEL_RESOURCE_ATTRIBUTES` (`service.namespace=<module>,deployment.environment.name=<env>`).
+An SDK that sees them exports; an environment with no `telemetry:` delivers none
+and a service exports nothing.
 
 This cell file is the render's inventory of a composition; it is not the
 retired `codefly/cell/v1` *import descriptor* that `environment import`
@@ -1140,6 +1164,17 @@ service-secrets:
         CODEFLY__…__IDENTITY_CLIENT_SECRET:
           key: lodestar-identity
           property: client_secret
+        # key + property + secret-store: this one key is read through a store of
+        # its own (a cell keeps its identity provider's secrets apart); the
+        # service's other keys keep the service's store. Rendered as the
+        # ExternalSecret data item's sourceRef.storeRef, so one ExternalSecret
+        # still owns the service's Secret.
+        CODEFLY__…__IDENTITY_CLIENT_ID:
+          key: workos-app
+          property: client_id
+          secret-store:
+            name: platform-identity
+            kind: ClusterSecretStore
       # defaults template: applies to every key not listed above; "{service}"
       # and "{key}" are substituted
       defaults:
@@ -1237,7 +1272,18 @@ service-secrets:
       services: [runtime/store]
       keys: [POSTGRES_USER]
       format: identifier          # hex (default), base64, identifier; `bytes` sizes it
+    - scope: service
+      configuration: signing
+      services: [witness/log]
+      keys: [SIGNING_KEY]
+      format: ed25519-pkcs8       # an Ed25519 private key, base64 PKCS#8 DER; no `bytes`
 ```
+
+`ed25519-pkcs8` mints a private key rather than random bytes. Like every
+generated value it is written only where no remote key holds it, so a key a
+service already signs with is never replaced by a second run. It is one
+workload's key: a plan in which more than one service reads it is refused, and
+the remedy is to remove the extra reader, never to re-mint the key.
 
 A key its producer declares as a template (core's `ConfigurationValue.template`
 — a Postgres agent's `READ_WRITE_CONNECTION`, say: role, address and database
@@ -1324,7 +1370,31 @@ codefly deploy dev payments/api --env staging --commit --push
    re-derived so the tree still matches it. It refuses when the module was never
    rendered, was rendered for another environment (or another `--app-project`,
    when given), was edited since its render, or does not pin the image the build
-   produced — in every case: run the full render first.
+   produced — in every case: run the full render first. The delivery overlay
+   (`module-manifests/`) is publish's, not the render's: publish settles and
+   signs the manifest there and adds its delivery Job after the render, so that
+   directory is compared on neither side and carried into the re-derived
+   inventory as found; "edited since its render" means a file the render owns.
+
+   When the environment declares a `host:` block, the environment's cell file
+   (`<gitops path>/cells/<environment>/cell.yaml`) is re-derived from the
+   rendered trees exactly as a render derives it, written, and is among the
+   changed files. A cell admits only the builds its cell file names — a
+   validation cell takes that approval from the branch head's file — so a
+   re-pin the file did not carry would be refused at admission and never run.
+   Because the file is derived from the whole workspace, it may move nothing
+   but the service's own image digests and the `source` revision against the
+   file the branch carries (the workspace's `HEAD`; the file on disk when the
+   workspace is not a git checkout). Anything else — a sibling module rendered
+   and not committed, an uncommitted environment change, a sibling tree at
+   another inventory schema — would be approved by the dev deployment's
+   commit, so it is refused, naming each namespace that moved, before the image
+   is built: commit those changes (after `codefly deploy gitops render --all
+   --env <env>` if the trees are stale), then deploy again. That includes an
+   earlier dev deployment of another service left uncommitted: commit it
+   before the next. After the build, only digests of the repositories it
+   produced may move. With no committed cell file there is no approval to
+   replace, and it refuses the same way.
 4. **Record.** `.codefly-render.json` gains a `dev` entry for the service:
    source origin and path, the source's git commit and whether it was dirty, the
    image and digest, and the time. `codefly doctor workspace` reports each one as

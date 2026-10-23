@@ -14,6 +14,8 @@ import (
 
 	"github.com/codefly-dev/cli/pkg/environments"
 	"github.com/codefly-dev/cli/pkg/gitops/cellfile"
+	"github.com/codefly-dev/cli/pkg/orchestration"
+	"github.com/codefly-dev/cli/pkg/run/fixture"
 	"github.com/codefly-dev/cli/pkg/solutionrun"
 	"github.com/codefly-dev/core/configurations"
 	"github.com/codefly-dev/core/resources"
@@ -86,23 +88,36 @@ func CellPath(workspace *resources.Workspace, env *environments.Environment) (st
 // composition that produced them, and writes it. It runs after a module
 // render, so the file always describes the trees as they stand.
 func RenderCell(ctx context.Context, workspace *resources.Workspace, env *environments.Environment) (CellResult, error) {
+	file, result, err := deriveCell(ctx, workspace, env)
+	if err != nil {
+		return CellResult{}, err
+	}
+	if err := writeCell(&file, result.Path); err != nil {
+		return CellResult{}, err
+	}
+	return result, nil
+}
+
+// deriveCell is RenderCell without the write: the cell file the rendered
+// trees and the composition describe, and the path it belongs at.
+func deriveCell(ctx context.Context, workspace *resources.Workspace, env *environments.Environment) (cellfile.File, CellResult, error) {
 	if workspace == nil || env == nil {
-		return CellResult{}, errors.New("a cell is rendered for a workspace and an environment")
+		return cellfile.File{}, CellResult{}, errors.New("a cell is rendered for a workspace and an environment")
 	}
 	if env.Host == nil {
-		return CellResult{}, fmt.Errorf("environment %s declares no host, so it has no cell to describe", env.Name)
+		return cellfile.File{}, CellResult{}, fmt.Errorf("environment %s declares no host, so it has no cell to describe", env.Name)
 	}
 	modulesDir := filepath.Dir(moduleRenderDestination(workspace, "module"))
 	entries, err := os.ReadDir(modulesDir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return CellResult{}, fmt.Errorf("no module has been rendered under %s", modulesDir)
+		return cellfile.File{}, CellResult{}, fmt.Errorf("no module has been rendered under %s", modulesDir)
 	}
 	if err != nil {
-		return CellResult{}, fmt.Errorf("list rendered modules: %w", err)
+		return cellfile.File{}, CellResult{}, fmt.Errorf("list rendered modules: %w", err)
 	}
 	consumers, configured, err := endpointConsumers(ctx, workspace, env)
 	if err != nil {
-		return CellResult{}, err
+		return cellfile.File{}, CellResult{}, err
 	}
 	file := cellfile.File{
 		Schema: cellfile.Schema, Environment: env.Name,
@@ -120,7 +135,7 @@ func RenderCell(ctx context.Context, workspace *resources.Workspace, env *enviro
 			continue
 		}
 		if loadErr != nil {
-			return CellResult{}, fmt.Errorf("the render of module %s cannot be read, so the cell file cannot describe what it delivers; render %s again for %s: %w", entry.Name(), entry.Name(), env.Name, loadErr)
+			return cellfile.File{}, CellResult{}, fmt.Errorf("the render of module %s cannot be read, so the cell file cannot describe what it delivers; render %s again for %s: %w", entry.Name(), entry.Name(), env.Name, loadErr)
 		}
 		if inventory.Environment != env.Name {
 			result.Skipped = append(result.Skipped, inventory.Module)
@@ -136,31 +151,36 @@ func RenderCell(ctx context.Context, workspace *resources.Workspace, env *enviro
 		}
 		namespace, namespaceErr := cellNamespace(ctx, workspace, env, tree, &inventory, consumers)
 		if namespaceErr != nil {
-			return CellResult{}, namespaceErr
+			return cellfile.File{}, CellResult{}, namespaceErr
 		}
 		file.Namespaces = append(file.Namespaces, namespace)
 		result.Modules = append(result.Modules, inventory.Module)
 	}
 	if len(file.Namespaces) == 0 {
-		return CellResult{}, fmt.Errorf("no module is rendered for environment %s under %s", env.Name, modulesDir)
+		return cellfile.File{}, CellResult{}, fmt.Errorf("no module is rendered for environment %s under %s", env.Name, modulesDir)
 	}
 	sort.Slice(file.Namespaces, func(i, j int) bool { return file.Namespaces[i].Name < file.Namespaces[j].Name })
 	sort.Strings(result.Modules)
 	sort.Strings(result.Skipped)
+	if result.Path, err = CellPath(workspace, env); err != nil {
+		return cellfile.File{}, CellResult{}, err
+	}
+	return file, result, nil
+}
+
+// writeCell encodes the cell file and writes it at path.
+func writeCell(file *cellfile.File, path string) error {
 	body, err := file.Encode()
 	if err != nil {
-		return CellResult{}, fmt.Errorf("the rendered cell cannot be written: %w", err)
+		return fmt.Errorf("the rendered cell cannot be written: %w", err)
 	}
-	if result.Path, err = CellPath(workspace, env); err != nil {
-		return CellResult{}, err
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create the cell directory: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(result.Path), 0o755); err != nil {
-		return CellResult{}, fmt.Errorf("create the cell directory: %w", err)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		return fmt.Errorf("write the cell file: %w", err)
 	}
-	if err := os.WriteFile(result.Path, body, 0o600); err != nil {
-		return CellResult{}, fmt.Errorf("write the cell file: %w", err)
-	}
-	return result, nil
+	return nil
 }
 
 // cellSource is the repository and publication branch the environment's
@@ -322,7 +342,11 @@ func cellNamespace(ctx context.Context, workspace *resources.Workspace, env *env
 		}
 	}
 	sort.Slice(namespace.Workloads, func(i, j int) bool { return namespace.Workloads[i].Name < namespace.Workloads[j].Name })
-	if inventory.ModuleManifestPath != "" {
+	carries, err := carriesDelivery(workspace, env, inventory)
+	if err != nil {
+		return cellfile.Namespace{}, err
+	}
+	if carries {
 		delivery, err := cellDelivery(env, namespace.Name)
 		if err != nil {
 			return cellfile.Namespace{}, fmt.Errorf("module %s: %w", inventory.Module, err)
@@ -449,15 +473,33 @@ func podSelector(manifests []manifest, name, kind string) (map[string]string, er
 	return nil, fmt.Errorf("workload %s %s is not among the rendered manifests", kind, name)
 }
 
-// cellDelivery is the presence carrier of a module that renders a module
-// manifest for a hosted environment: the Job publish writes to POST it,
-// declared from deliveryCarrierOf — the rule that Job is rendered from — and
-// never read off a tree. The render writes the manifest and the account the
-// Job runs as; the Job itself is written only at publish, into the delivery
-// repository, so a tree in the workspace never holds it, and the cell must
-// declare it before publish runs for its admission to let the Job in.
+// carriesDelivery reports whether a delivery Job runs in the module's
+// namespace: it renders a module manifest, or it hosts the delivery API and
+// the composition states the environment's module envelope, which publish
+// delivers from the host's namespace.
+func carriesDelivery(workspace *resources.Workspace, env *environments.Environment, inventory *Inventory) (bool, error) {
+	if inventory.ModuleManifestPath != "" {
+		return true, nil
+	}
+	if !inventory.HostsDelivery || env.Host == nil || workspace == nil {
+		return false, nil
+	}
+	return fixture.StatesGrants(workspace, env.Name)
+}
+
+// cellDelivery is the presence carrier of a module that carries delivery for a
+// hosted environment — one that renders a module manifest, or that hosts the
+// delivery API for a composition stating the envelope (carriesDelivery): the
+// Job publish writes to POST the document, declared from deliveryCarrierOf —
+// the rule that Job is rendered from — and never read off a tree. A module
+// that renders a manifest has its manifest and its delivery account written by
+// the render; a module that carries only the envelope has neither, because
+// publish writes that account (writeEnvelope) along with the Job. The Job
+// itself is always written at publish, into the delivery repository, so a tree
+// in the workspace never holds it, and the cell must declare the carrier
+// before publish runs for its admission to let the Job in.
 func cellDelivery(env *environments.Environment, namespace string) (*cellfile.Delivery, error) {
-	carrier := deliveryCarrierOf(deliveryManifest)
+	carrier := deliveryCarrierOf()
 	repository, digest, err := splitPinnedImage(carrier.Image)
 	if err != nil {
 		return nil, fmt.Errorf("the delivery Job's %w", err)
@@ -478,6 +520,10 @@ func endpointConsumers(ctx context.Context, workspace *resources.Workspace, env 
 	references, referencesErr := configuredEndpointReferences(ctx, workspace, env)
 	if referencesErr != nil {
 		return nil, nil, referencesErr
+	}
+	reach, reachErr := derivedRunnableReach(ctx, workspace)
+	if reachErr != nil {
+		return nil, nil, reachErr
 	}
 	consumers := map[string][]string{}
 	var configured []string
@@ -513,25 +559,8 @@ func endpointConsumers(ctx context.Context, workspace *resources.Workspace, env 
 				if env.Excludes(targetModule, dependency.Name) {
 					continue
 				}
-				target, err := workspace.LoadService(ctx, &resources.ServiceWithModule{Name: dependency.Name, Module: targetModule})
-				if err != nil {
-					continue
-				}
-				var names []string
-				for _, endpoint := range dependency.Endpoints {
-					if endpoint != nil && endpoint.Name != "" {
-						names = append(names, endpoint.Name)
-					}
-				}
-				if len(names) == 0 {
-					for _, endpoint := range target.Endpoints {
-						if endpoint != nil {
-							names = append(names, endpoint.Name)
-						}
-					}
-				}
-				for _, name := range names {
-					add(resources.ServiceUnique(targetModule, target.Name)+"/"+name, consumer)
+				for _, key := range dependencyKeys(ctx, workspace, module.Name, dependency) {
+					add(key, consumer)
 				}
 			}
 			reads := references[consumer]
@@ -549,6 +578,17 @@ func endpointConsumers(ctx context.Context, workspace *resources.Workspace, env 
 				add(key, consumer)
 			}
 		}
+	}
+	gatewayEdges, gatewayErr := hostRouteConsumers(ctx, workspace, env)
+	if gatewayErr != nil {
+		return nil, nil, gatewayErr
+	}
+	for _, edge := range append(gatewayEdges, preparedReachConsumers(reach)...) {
+		if slices.Contains(consumers[edge.key], edge.consumer) {
+			continue
+		}
+		configured = append(configured, edge.why)
+		add(edge.key, edge.consumer)
 	}
 	consumed, err := solutionrun.ConsumedEndpoints(ctx, workspace)
 	if err != nil {
@@ -696,4 +736,99 @@ func labelPodTemplates(ctx context.Context, root string) error {
 		}
 		return shared.WriteFileAtomic(ctx, path, []byte(out.String()), 0o644)
 	})
+}
+
+// consumerEdge is one consumer of one endpoint, with the sentence the render
+// prints to say where it came from: an edge nobody declared is reported, or
+// an operator reads a cell admitting a caller no service names.
+type consumerEdge struct {
+	key      string
+	consumer string
+	why      string
+}
+
+// hostRouteConsumers is the gateway on every endpoint a composed solution
+// reaches through the host (orchestration.HostRouteTargets, the derivation the
+// mesh edges read). A route is one hop THROUGH the gateway, not a direct call,
+// so a cell that admits only the solution's backend denies every proxied call
+// with nothing in the module's log to say so.
+func hostRouteConsumers(ctx context.Context, workspace *resources.Workspace, env *environments.Environment) ([]consumerEdge, error) {
+	if env.Host == nil || env.Host.Gateway == "" {
+		return nil, nil
+	}
+	gatewayModule, _, _ := strings.Cut(env.Host.Gateway, "/")
+	targets, err := orchestration.HostRouteTargets(ctx, workspace, gatewayModule)
+	if err != nil {
+		return nil, err
+	}
+	edges := make([]consumerEdge, 0, len(targets))
+	for _, target := range targets {
+		key := resources.ServiceUnique(target.Module, target.Service) + "/" + target.Endpoint
+		edges = append(edges, consumerEdge{key: key, consumer: env.Host.Gateway,
+			why: fmt.Sprintf("cell: %s reaches %s because the host routes it there; declared by the composition's consumption, not by a service dependency", env.Host.Gateway, key)})
+	}
+	return edges, nil
+}
+
+// preparedReachConsumers is every executor on every owner endpoint its
+// prepared runnable bindings call (derivedRunnableReach). The owner publishes
+// an operation and the executor installs it; neither declares a dependency on
+// the other, so without this the cell admits nobody on the owner's endpoint,
+// the mesh denies the call, and the executor reports only an owner that did
+// not answer.
+func preparedReachConsumers(reach *runnableReach) []consumerEdge {
+	if reach == nil {
+		return nil
+	}
+	var edges []consumerEdge
+	for key := range reach.owners {
+		for _, executor := range reach.executors {
+			consumer := executor.Unique()
+			edges = append(edges, consumerEdge{key: key, consumer: consumer,
+				why: fmt.Sprintf("cell: %s reaches %s through the runnable bindings it installs; prepared by the composition, not declared by either service", consumer, key)})
+		}
+	}
+	slices.SortFunc(edges, func(a, b consumerEdge) int {
+		if a.key != b.key {
+			return strings.Compare(a.key, b.key)
+		}
+		return strings.Compare(a.consumer, b.consumer)
+	})
+	return edges
+}
+
+// dependencyKeys is the `<module>/<service>/<endpoint>` of every endpoint one
+// declared service dependency reaches: the endpoints it names, or all of the
+// target's when it names none. A dependency on a service the workspace does
+// not compose reaches nothing here; the composition refuses it elsewhere.
+func dependencyKeys(ctx context.Context, workspace *resources.Workspace, module string, dependency *resources.ServiceDependency) []string {
+	if dependency == nil || dependency.Name == "" {
+		return nil
+	}
+	targetModule := dependency.Module
+	if targetModule == "" {
+		targetModule = module
+	}
+	target, err := workspace.LoadService(ctx, &resources.ServiceWithModule{Name: dependency.Name, Module: targetModule})
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, endpoint := range dependency.Endpoints {
+		if endpoint != nil && endpoint.Name != "" {
+			names = append(names, endpoint.Name)
+		}
+	}
+	if len(names) == 0 {
+		for _, endpoint := range target.Endpoints {
+			if endpoint != nil {
+				names = append(names, endpoint.Name)
+			}
+		}
+	}
+	keys := make([]string, 0, len(names))
+	for _, name := range names {
+		keys = append(keys, resources.ServiceUnique(targetModule, target.Name)+"/"+name)
+	}
+	return keys
 }

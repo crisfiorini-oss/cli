@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codefly-dev/cli/pkg/environments"
 	"github.com/codefly-dev/cli/pkg/gitops/cellfile"
 	"github.com/codefly-dev/core/resources"
 	"github.com/codefly-dev/core/solutionhost"
@@ -439,11 +440,21 @@ func TestCellFileDeclaresTheCarrierOfEveryModuleThatRendersAManifest(t *testing.
 	shop := file.Namespaces[1]
 	require.NotNil(t, shop.Delivery, "a render, without publish, declares the carrier")
 
-	// The Job publish writes, read back as a cell reads a pod.
-	directory := t.TempDir()
-	job, err := renderDeliveryJob(directory, deliveryJobName(deliveryManifest, "shop", "staging", [][]byte{[]byte("carrier")}), "acme-shop",
-		deliveryManifest, manifestDeliveryPath, testDeliveryTarget(), []deliveryDocument{{ConfigMap: "manifest", Key: "signed.yaml", Name: "shop.json"}})
-	require.NoError(t, err)
+	// Each Job publish writes — a manifest's, and the envelope's from the
+	// host's namespace — read back as a cell reads a pod: one carrier.
+	for kind, path := range map[string]string{deliveryManifest: manifestDeliveryPath, deliveredEnvelopeKind: envelopeDeliveryPath} {
+		directory := t.TempDir()
+		job, err := renderDeliveryJob(directory, deliveryJobName(kind, "shop", "staging", [][]byte{[]byte("carrier")}), "acme-shop",
+			kind, path, testDeliveryTarget(), []deliveryDocument{{ConfigMap: "manifest", Key: "signed.yaml", Name: "shop.json"}})
+		require.NoError(t, err)
+		requireTheAdmittedCarrier(t, directory, job, shop.Delivery)
+	}
+}
+
+// requireTheAdmittedCarrier reads a rendered delivery Job's pod as a cell
+// reads one and requires it to be the carrier the cell declares.
+func requireTheAdmittedCarrier(t *testing.T, directory, job string, declared *cellfile.Delivery) {
+	t.Helper()
 	body, err := os.ReadFile(filepath.Join(directory, job))
 	require.NoError(t, err)
 	documents, _, err := decodeYAML(job, body)
@@ -464,8 +475,31 @@ func TestCellFileDeclaresTheCarrierOfEveryModuleThatRendersAManifest(t *testing.
 		Kind: rendered.kind, Selector: selector, ServiceAccount: account,
 		SPIFFEID:  "spiffe://cluster.example/ns/acme-shop/sa/" + account,
 		Container: fmt.Sprint(container["name"]), Image: cellfile.Image{Repository: repository, Digest: digest},
-	}, shop.Delivery)
+	}, declared)
 	require.Equal(t, deliveryServiceAccount, account, "the delivery account in the module's namespace")
+}
+
+// TestAHostStatingAnEnvelopeCarriesDelivery: the module hosting the delivery
+// API carries the delivery Job when the composition states the environment's
+// envelope, though it renders no manifest of its own.
+func TestAHostStatingAnEnvelopeCarriesDelivery(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, resources.WorkspaceConfigurationName), []byte("name: acme\nlayout: modules\n"), 0o644))
+	workspace, err := resources.LoadWorkspaceFromDir(context.Background(), root)
+	require.NoError(t, err)
+	env := &environments.Environment{Name: "staging", Host: testHost()}
+	host := &Inventory{Module: "platform", HostsDelivery: true}
+	carries, err := carriesDelivery(workspace, env, host)
+	require.NoError(t, err)
+	require.False(t, carries, "no envelope stated, no manifest rendered")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "configurations", "staging"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "configurations", "staging", "module-envelope.json"), []byte(`{"principals":{}}`), 0o644))
+	carries, err = carriesDelivery(workspace, env, host)
+	require.NoError(t, err)
+	require.True(t, carries)
+	carries, err = carriesDelivery(workspace, env, &Inventory{Module: "crm"})
+	require.NoError(t, err)
+	require.False(t, carries, "only the host delivers the envelope")
 }
 
 // An image is pinned by a sha256 image-manifest digest and nothing else: an
@@ -509,4 +543,61 @@ func TestCellFileRefusesAWorkloadSelectedByTheCarrierLabel(t *testing.T) {
 	require.NoError(t, os.WriteFile(rendered, []byte(strings.ReplaceAll(string(data), "app.kubernetes.io/name: api", deliveryLabel+": "+deliveryManifest)), 0o644))
 	_, err = RenderCell(context.Background(), workspace, env)
 	require.ErrorContains(t, err, `workload api selects its pods by the "codefly.dev/delivery" label, which is reserved for the delivery Job`)
+}
+
+// writeExecutorWorkspace composes shop/api, which publishes a gRPC operation
+// and serves a connect endpoint, and runtime/worker, which installs the
+// prepared bindings. Neither declares a dependency on the other: the owner
+// publishes, the executor installs, and the reach exists only in the prepared
+// index.
+func writeExecutorWorkspace(t *testing.T, endpoint string) *resources.Workspace {
+	t.Helper()
+	root := t.TempDir()
+	apiYAML := devServiceYAML("api") + "endpoints:\n  - name: connect\n    api: connect\n  - name: grpc\n    api: grpc\n  - name: rest\n    api: rest\n"
+	index := `{"schema":"codefly/runnable-operations/v1","workspace":"acme","module":"shop","operations":[` +
+		`{"name":"shop-` + endpoint + `-sync","version":"0.1.0","digest":"d","service":"api","endpoint":"` + endpoint + `","method":"/shop.v1.Shop/Sync","path":"contracts/runnables/shop/` + endpoint + `/Sync"}]}`
+	files := map[string]string{
+		resources.WorkspaceConfigurationName:                                                          "name: acme\nlayout: modules\nmodules:\n  - name: shop\n  - name: runtime\nenvironments:\n  - name: staging\n    namespace: acme\n",
+		filepath.Join("modules", "shop", resources.ModuleConfigurationName):                           "kind: module\nname: shop\nservices:\n  - name: api\n",
+		filepath.Join("modules", "shop", "services", "api", resources.ServiceConfigurationName):       apiYAML,
+		filepath.Join("modules", "shop", "contracts", "runnables", "index.json"):                      index,
+		filepath.Join("modules", "runtime", resources.ModuleConfigurationName):                        "kind: module\nname: runtime\nservices:\n  - name: worker\n",
+		filepath.Join("modules", "runtime", "services", "worker", resources.ServiceConfigurationName): cellServiceYAML("worker") + "workspace-configuration-dependencies:\n  - runnable-bindings\n",
+	}
+	for rel, content := range files {
+		full := filepath.Join(root, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte(content), 0o644))
+	}
+	workspace, err := resources.LoadWorkspaceFromDir(context.Background(), root)
+	require.NoError(t, err)
+	return workspace
+}
+
+// The reach a composition PREPARES is an edge in the cell exactly as a
+// declared dependency is. Without it the cell admits nobody on the owner's
+// endpoint, the mesh denies the executor's call, and the executor reports an
+// owner that did not answer — the state this derivation makes unreachable.
+func TestThePreparedRunnableReachIsAConsumerEdge(t *testing.T) {
+	t.Run("a gRPC operation is called over its service's connect endpoint", func(t *testing.T) {
+		workspace := writeExecutorWorkspace(t, "grpc")
+		consumers, configured, err := endpointConsumers(context.Background(), workspace, selectedEnvironment(t, workspace, "staging"))
+		require.NoError(t, err)
+		require.Equal(t, []string{"runtime/worker"}, consumers["shop/api/connect"])
+		require.Empty(t, consumers["shop/api/grpc"], "no call is sent to the gRPC port")
+		require.Empty(t, consumers["shop/api/rest"])
+		require.Contains(t, configured, "cell: runtime/worker reaches shop/api/connect through the runnable bindings it installs; prepared by the composition, not declared by either service")
+	})
+	t.Run("a REST operation is called on the endpoint it is published on", func(t *testing.T) {
+		workspace := writeExecutorWorkspace(t, "rest")
+		consumers, _, err := endpointConsumers(context.Background(), workspace, selectedEnvironment(t, workspace, "staging"))
+		require.NoError(t, err)
+		require.Equal(t, []string{"runtime/worker"}, consumers["shop/api/rest"])
+		require.Empty(t, consumers["shop/api/connect"])
+	})
+	t.Run("an operation published on an endpoint the owner does not declare is refused", func(t *testing.T) {
+		workspace := writeExecutorWorkspace(t, "workload")
+		_, _, err := endpointConsumers(context.Background(), workspace, selectedEnvironment(t, workspace, "staging"))
+		require.EqualError(t, err, "module shop derived operation shop-workload-sync: service api publishes it on endpoint workload, which that service does not declare")
+	})
 }
