@@ -227,3 +227,18 @@ func TestAnOverriddenBuildIsPushedQualifiedAtTheRegistryItPullsThrough(t *testin
 	// repository) and this digest; the cell keeps that repository and digest.
 	require.Equal(t, "sha256:"+fmt.Sprintf("%064d", 1), digest, "the digest the deployment pins is the pushed one")
 }
+
+func TestForcedRebuildPreservesPublishedReleaseTag(t *testing.T) {
+	harness := newImageCacheHarness(t, true, true)
+	harness.peer.image = "example.test/app:1.2.3"
+	harness.rebuild = true
+	release := publishedImage{digest: "sha256:" + strings.Repeat("d", 64), labels: map[string]string{
+		buildInputsLabel: "sha256:" + strings.Repeat("e", 64), buildAgentLabel: "codefly.dev/go:0.1.0",
+	}}
+	stubRegistry(t, map[string]publishedImage{"example.test/app:1.2.3": release})
+	require.NotEqual(t, release.digest, harness.build(t))
+	args := harness.docker.buildArgs(t)
+	require.Len(t, args, 1)
+	require.Regexp(t, qualifiedTag, args[0])
+	require.NotContains(t, args[0], "-t example.test/app:1.2.3 ")
+}

@@ -156,22 +156,22 @@ func (b *Builder) decideImageReuse(
 			wool.Field("recipe", recipe.GetName()), wool.ErrField(identityErr))
 	}
 	decision := imageReuse{identity: identity}
-	// A build under a workspace agent override is not the build the release
-	// names, so it is pushed under a tag of its own (override_build.go).
+	// An agent override or explicit rebuild produces a separate build; preserve
+	// the release tag by using the existing input-qualified tag (override_build.go).
 	if shouldPush && releasedVersionTag(recipe.GetImage()) {
 		pinned, overrideErr := b.overriddenAgent(ctx)
 		if overrideErr != nil {
 			return decision, w.Wrap(overrideErr)
 		}
-		if pinned != "" {
+		if pinned != "" || b.world.RebuildImages {
 			if identity.Key == "" {
-				return decision, w.NewError("%s builds with agent %s, which the workspace overrides from the %s its release pins, and an image input cannot be bound to name that build apart from the release: %v",
-					b.instance.Unique(), b.instance.Service.Agent.Identifier(), pinned, identityErr)
+				return decision, w.NewError("%s requires a separate build tag, but an image input cannot be bound: %v",
+					b.instance.Unique(), identityErr)
 			}
 			recipe = proto.CloneOf(recipe)
 			recipe.Image = overrideBuildImage(recipe.GetImage(), identity.Key)
 			decision.image = recipe.GetImage()
-			w.Info("the agent is overridden, so this is not the release's build; tagging it apart",
+			w.Info("an override or rebuild was requested; using a separate build tag",
 				wool.Field("agent", b.instance.Service.Agent.Identifier()), wool.Field("release_pins", pinned), wool.Field("image", decision.image))
 		}
 	}
