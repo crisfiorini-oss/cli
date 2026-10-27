@@ -294,6 +294,9 @@ type World struct {
 	// image, so it must stay reachable from every command that builds.
 	RebuildImages bool
 
+	// PublishedImages freezes builds to a previously published cell inventory.
+	PublishedImages map[string]string
+
 	// goModulePrefetch holds the Go module graphs this flow's recipes declared,
 	// fetched once on the host before any image build (see goModulePrefetch).
 	// It is removed when the flow stops.
@@ -2394,6 +2397,10 @@ func (flow *Flow) WithBuildxBuilder(name string) {
 // workspace already built from the same inputs.
 func (flow *Flow) WithRebuild(rebuild bool) {
 	flow.world.RebuildImages = rebuild
+}
+
+func (flow *Flow) WithPublishedImages(images map[string]string) {
+	flow.world.PublishedImages = images
 }
 
 func (flow *Flow) WithImageDigest(capture bool) {

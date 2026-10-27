@@ -99,6 +99,16 @@ func (b *Builder) Deploy(ctx context.Context) (*OutputProperty, error) {
 		return nil, w.Wrapf(err, "cannot create build context")
 	}
 	dockerContext.ImageDigest = b.imageDigest
+	if b.world.PublishedImages != nil {
+		image, err := b.publishedImage()
+		if err != nil {
+			return nil, err
+		}
+		repository := strings.SplitN(image, "@", 2)[0]
+		if strings.HasSuffix(repository, "/"+b.instance.Unique()) {
+			dockerContext.DockerRepository = strings.TrimSuffix(repository, "/"+b.instance.Unique())
+		}
+	}
 
 	deploy, err := deployments.GetKubernetesDeployment(
 		ctx,

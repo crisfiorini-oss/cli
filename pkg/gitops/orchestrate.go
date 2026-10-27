@@ -26,7 +26,8 @@ type renderBuild struct {
 	validateCluster bool
 	rebuild         bool // withoutCell leaves the environment's cell file to the caller: a
 	// whole-composition render derives it once, after every module.
-	withoutCell bool
+	withoutCell    bool
+	imagesFromCell string
 }
 
 func RenderModule(ctx context.Context, workspace *resources.Workspace, module *resources.Module, env *environments.Environment, project string, sink orchestration.OutputSink) (RenderResult, error) {
@@ -370,7 +371,7 @@ func (r *moduleRender) renderRoots(ctx context.Context, roots []*resources.Servi
 			r.module,
 			service,
 			r.env,
-			renderBuild{validateCluster: r.build.validateCluster, rebuild: r.build.rebuild},
+			renderBuild{validateCluster: r.build.validateCluster, rebuild: r.build.rebuild, imagesFromCell: r.build.imagesFromCell},
 			r.sink,
 			destinations,
 			func(outputs map[string]*builderv0.DeploymentOutput) {
@@ -798,6 +799,16 @@ func renderServiceFlow(
 	flow.WithStandAlone(build.standAlone)
 	flow.WithClusterValidation(build.validateCluster)
 	flow.WithRebuild(build.rebuild)
+	if build.imagesFromCell != "" {
+		if build.rebuild {
+			return fmt.Errorf("images-from-cell cannot be combined with rebuild")
+		}
+		images, err := publishedCellImages(build.imagesFromCell, workspace.Name, env.Name)
+		if err != nil {
+			return err
+		}
+		flow.WithPublishedImages(images)
+	}
 	defer func() {
 		if stopErr := flow.Stop(); result == nil && stopErr != nil {
 			result = stopErr

@@ -33,7 +33,8 @@ type ProduceRequest struct {
 	Snapshot bool
 	// Rebuild builds every image even when no input of it changed, instead of
 	// keeping the image this workspace already built from those inputs.
-	Rebuild bool
+	Rebuild        bool
+	ImagesFromCell string
 	// WithoutCell leaves the environment's cell file to the caller: a
 	// whole-composition render derives it once, after every module.
 	WithoutCell bool
@@ -121,7 +122,7 @@ func (c *Coordinator) Observe(ctx context.Context, request *ObserveRequest) (Obs
 type flowProducer struct{}
 
 func (flowProducer) Produce(ctx context.Context, request ProduceRequest) (RenderResult, error) {
-	build := renderBuild{standAlone: request.StandAlone, validateCluster: request.ValidateCluster, rebuild: request.Rebuild, withoutCell: request.WithoutCell}
+	build := renderBuild{standAlone: request.StandAlone, validateCluster: request.ValidateCluster, rebuild: request.Rebuild, withoutCell: request.WithoutCell, imagesFromCell: request.ImagesFromCell}
 	if request.Service == nil {
 		return renderModuleTree(ctx, request.Workspace, request.Module, request.Environment, request.AppProject, request.Sink, !request.Snapshot, build)
 	}

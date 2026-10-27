@@ -110,7 +110,7 @@ var gitOpsRenderCmd = &cobra.Command{
 			result, renderErr := gitops.NewCoordinator().Render(ctx, gitops.ProduceRequest{
 				Workspace: workspace, Module: target, Environment: env,
 				AppProject: gitOpsProject, ValidateCluster: gitOpsValidateCluster,
-				Rebuild: gitOpsRebuild, WithoutCell: true, Sink: cli.NewOutputSink(),
+				Rebuild: gitOpsRebuild, ImagesFromCell: gitOpsImagesFromCell, WithoutCell: true, Sink: cli.NewOutputSink(),
 			})
 			if renderErr != nil {
 				return result, renderErr
@@ -165,7 +165,7 @@ var gitOpsSnapshotCmd = &cobra.Command{
 		result, err := gitops.NewCoordinator().Render(ctx, gitops.ProduceRequest{
 			Workspace: workspace, Module: module, Environment: env,
 			AppProject: gitOpsProject, Snapshot: true,
-			Rebuild: gitOpsRebuild, Sink: cli.NewOutputSink(),
+			Rebuild: gitOpsRebuild, ImagesFromCell: gitOpsImagesFromCell, Sink: cli.NewOutputSink(),
 		})
 		if err != nil {
 			return err
@@ -636,6 +636,7 @@ var (
 	gitOpsAllowCellRemovals        []string
 	gitOpsValidateCluster          bool
 	gitOpsRebuild                  bool
+	gitOpsImagesFromCell           string
 )
 
 func init() {
@@ -652,6 +653,7 @@ func init() {
 		command.Flags().BoolVar(&skipWorkspaceReadiness, SkipWorkspaceReadinessFlag, false,
 			"Proceed even when `codefly doctor workspace --env <env> --module <module>` says the workspace is not ready (for an operator mid-repair; the skip is announced in the output)")
 	}
+	gitOpsRenderCmd.Flags().StringVar(&gitOpsImagesFromCell, "images-from-cell", "", "Render configuration using the exact published images in a cell file; refuse missing services instead of building")
 	gitOpsRenderCmd.Flags().BoolVar(&gitOpsRenderAll, "all", false,
 		"Render every module the workspace composes, the host first, and derive the environment's cell file once at the end")
 	gitOpsRenderCmd.Flags().BoolVar(&gitOpsValidateCluster, "validate-cluster", false,
@@ -761,7 +763,7 @@ func renderComposition(ctx context.Context) error {
 		result, renderErr := gitops.NewCoordinator().Render(ctx, gitops.ProduceRequest{
 			Workspace: workspace, Module: module, Environment: env,
 			AppProject: gitOpsProject, ValidateCluster: gitOpsValidateCluster,
-			Rebuild: gitOpsRebuild, WithoutCell: true, Sink: cli.NewOutputSink(),
+			Rebuild: gitOpsRebuild, ImagesFromCell: gitOpsImagesFromCell, WithoutCell: true, Sink: cli.NewOutputSink(),
 		})
 		if renderErr != nil {
 			return fmt.Errorf("render %s: %w", module.Name, renderErr)

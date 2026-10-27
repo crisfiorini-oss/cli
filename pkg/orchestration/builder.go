@@ -305,6 +305,12 @@ type plannedBuild struct {
 // before the fetch, and Build adopts that image. Build executes the planned
 // recipe; a flow without a plan phase plans at the start of Build instead.
 func (b *Builder) Plan(ctx context.Context) (*OutputProperty, error) {
+	if b.world.PublishedImages != nil {
+		if _, err := b.publishedImage(); err != nil {
+			return nil, err
+		}
+		return OnInit(), nil
+	}
 	w := wool.Get(ctx).In("Builder", wool.ThisField(b.instance))
 	w.Debug("Plan")
 	if b.planned != nil {
@@ -431,6 +437,17 @@ func (b *Builder) Plan(ctx context.Context) (*OutputProperty, error) {
 // Build executes the service's planned recipe, planning it first when the flow
 // has no plan phase.
 func (b *Builder) Build(ctx context.Context) (*OutputProperty, error) {
+	if b.world.PublishedImages != nil {
+		image, err := b.publishedImage()
+		if err != nil {
+			return nil, err
+		}
+		b.imageDigest = strings.SplitN(image, "@", 2)[1]
+		if err := b.outputPropertyForBuild.Set(ctx, &BuilderBuildOutput{}); err != nil {
+			return nil, err
+		}
+		return b.outputPropertyForBuild.Process(ctx)
+	}
 	w := wool.Get(ctx).In("Builder", wool.ThisField(b.instance))
 	w.Debug("Build")
 	if b.planned == nil {
@@ -620,4 +637,13 @@ func dockerBuildResult(result *builderv0.BuildResult) *builderv0.DockerBuildResu
 
 func (b *Builder) Unique() string {
 	return b.instance.Unique()
+}
+
+func (b *Builder) publishedImage() (string, error) {
+	image := b.world.PublishedImages[b.instance.Unique()]
+	parts := strings.SplitN(image, "@", 2)
+	if len(parts) != 2 || parts[0] == "" || !sha256Digest.MatchString(parts[1]) {
+		return "", fmt.Errorf("no published digest for %s; refusing a build in images-from-cell mode", b.instance.Unique())
+	}
+	return image, nil
 }
