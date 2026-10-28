@@ -187,6 +187,22 @@ func deriveCellFrom(ctx context.Context, workspace *resources.Workspace, env *en
 	if err = refuseUnrenderedModules(workspace, env, result.Modules); err != nil {
 		return cellfile.File{}, CellResult{}, err
 	}
+	// Undelivered modules have no workload identity the cell can admit.
+	delivered := map[string]bool{}
+	for _, namespace := range file.Namespaces {
+		for _, workload := range namespace.Workloads {
+			delivered[workload.Service] = true
+		}
+	}
+	for ni := range file.Namespaces {
+		for wi := range file.Namespaces[ni].Workloads {
+			workload := &file.Namespaces[ni].Workloads[wi]
+			for ei := range workload.Endpoints {
+				endpoint := &workload.Endpoints[ei]
+				endpoint.Consumers = slices.DeleteFunc(endpoint.Consumers, func(service string) bool { return !delivered[service] })
+			}
+		}
+	}
 	sort.Slice(file.Namespaces, func(i, j int) bool { return file.Namespaces[i].Name < file.Namespaces[j].Name })
 	sort.Strings(result.Modules)
 	sort.Strings(result.Skipped)

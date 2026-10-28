@@ -249,6 +249,25 @@ func TestExistingCellPermitsNewUnrenderedModulesWithoutLosingDeliveredModules(t 
 	after, err := os.ReadFile(result.Path)
 	require.NoError(t, err)
 	require.Equal(t, before, after)
+	modulePath := filepath.Join(workspace.Dir(), "modules", "future")
+	servicePath := filepath.Join(modulePath, "services", "consumer")
+	require.NoError(t, os.MkdirAll(servicePath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(modulePath, resources.ModuleConfigurationName), []byte("kind: module\nname: future\nservices:\n  - name: consumer\n"), 0o644))
+	service := cellServiceYAML("consumer") + "service-dependencies:\n  - name: api\n    module: shop\n    endpoints:\n      - name: grpc\n"
+	require.NoError(t, os.WriteFile(filepath.Join(servicePath, resources.ServiceConfigurationName), []byte(service), 0o644))
+	_, err = RenderCell(context.Background(), workspace, env)
+	require.NoError(t, err)
+	current, err := os.ReadFile(result.Path)
+	require.NoError(t, err)
+	file, err := cellfile.Parse(current)
+	require.NoError(t, err)
+	for _, namespace := range file.Namespaces {
+		for _, workload := range namespace.Workloads {
+			for _, endpoint := range workload.Endpoints {
+				require.NotContains(t, endpoint.Consumers, "future/consumer")
+			}
+		}
+	}
 
 	previous, err := cellfile.Parse(before)
 	require.NoError(t, err)
