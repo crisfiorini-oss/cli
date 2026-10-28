@@ -234,6 +234,31 @@ func TestPublishedCellUsesPublishedTreesAndRefusesMissingModules(t *testing.T) {
 	require.Equal(t, before, after, "incomplete publication must leave the last complete cell unchanged")
 }
 
+func TestExistingCellPermitsNewUnrenderedModulesWithoutLosingDeliveredModules(t *testing.T) {
+	workspace := writeCellWorkspace(t)
+	env := selectedEnvironment(t, workspace, "staging")
+	renderCellTree(t, workspace, "shop", "api", "acme-shop", "staging")
+	renderCellTree(t, workspace, "billing", "ledger", "acme-billing", "staging")
+	result, err := RenderCell(context.Background(), workspace, env)
+	require.NoError(t, err)
+	before, err := os.ReadFile(result.Path)
+	require.NoError(t, err)
+	workspace.Modules = append(workspace.Modules, &resources.ModuleReference{Name: "future"})
+	require.NoError(t, refuseUnrenderedModules(workspace, env, []string{"shop", "billing"}))
+	require.ErrorContains(t, refuseUnrenderedModules(workspace, env, []string{"shop"}), "billing")
+	after, err := os.ReadFile(result.Path)
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+
+	previous, err := cellfile.Parse(before)
+	require.NoError(t, err)
+	previous.Coordinate = "another-cell"
+	require.NoError(t, writeCell(previous, result.Path))
+	require.ErrorContains(t, refuseUnrenderedModules(workspace, env, []string{"shop", "billing"}), "identity differs")
+	require.NoError(t, os.Remove(result.Path))
+	require.ErrorContains(t, refuseUnrenderedModules(workspace, env, []string{"shop", "billing"}), "future")
+}
+
 func TestCellFileInventoriesEveryRenderedWorkload(t *testing.T) {
 	workspace := writeCellWorkspace(t)
 	env := selectedEnvironment(t, workspace, "staging")

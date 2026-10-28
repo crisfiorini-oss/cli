@@ -204,6 +204,9 @@ func deriveCellFrom(ctx context.Context, workspace *resources.Workspace, env *en
 // a file would withdraw every workload that module delivers from the cell's
 // admission set, and nothing would say so.
 //
+// A matching previous cell permits newly composed modules to remain unrendered:
+// their absence removes no admitted workload. Existing modules still require
+// their complete render, and a first cell still requires every composed module.
 // It refuses rather than keeping the module's entries from the cell file
 // already on disk: an entry is derived from the composition as a whole — its
 // consumers are other modules' declared dependencies, its bindings and egress
@@ -220,6 +223,34 @@ func refuseUnrenderedModules(workspace *resources.Workspace, env *environments.E
 	}
 	if len(missing) == 0 {
 		return nil
+	}
+	previousPath, err := CellPath(workspace, env)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(previousPath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read previous cell before checking missing renders: %w", err)
+	}
+	if err == nil {
+		previous, parseErr := cellfile.Parse(data)
+		if parseErr != nil {
+			return fmt.Errorf("read previous cell before checking missing renders: %w", parseErr)
+		}
+		if previous.Environment != env.Name || previous.Coordinate != env.Host.Coordinate || previous.Component != env.Host.Component || previous.TrustDomain != env.Host.TrustDomain || previous.Domain != env.Host.Domain {
+			return errors.New("previous cell identity differs from this environment; cannot establish which modules were delivered")
+		}
+		delivered := make(map[string]bool, len(previous.Namespaces))
+		for _, namespace := range previous.Namespaces {
+			if namespace.Module == "" {
+				return errors.New("previous cell namespace names no module; cannot establish which modules were delivered")
+			}
+			delivered[namespace.Module] = true
+		}
+		missing = slices.DeleteFunc(missing, func(module string) bool { return !delivered[module] })
+		if len(missing) == 0 {
+			return nil
+		}
 	}
 	sort.Strings(missing)
 	commands := make([]string, 0, len(missing))
